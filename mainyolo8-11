@@ -1,0 +1,140 @@
+import cv2
+import numpy as np
+from ultralytics import YOLO
+import pickle
+import datetime
+import time
+import logging
+from openpyxl import Workbook, load_workbook
+import os
+
+# Menonaktifkan log YOLO
+logging.getLogger("ultralytics").setLevel(logging.ERROR)
+
+# Path ke file model, video, output, dan Excel
+model_path = "model/yolov11.pt"
+video_path = "Video/Video 2.mp4"
+output_path = "videohasilyolov11.avi"
+carpark_positions_path = "CarParkPos"
+excel_path = "fpsyolo11.xlsx"
+
+# Muat model YOLO
+model = YOLO(model_path)
+
+# Muat video input
+cap = cv2.VideoCapture(video_path)
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+video_fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+# Output video
+fourcc = cv2.VideoWriter_fourcc(*'XVID')
+out = cv2.VideoWriter(output_path, fourcc, video_fps, (width, height))
+
+# Load posisi parkir
+with open(carpark_positions_path, 'rb') as f:
+    posList = pickle.load(f)
+
+# Fungsi untuk mengecek ketersediaan parkir
+def checkParkingSpace(frame, car_boxes):
+    width, height = 15, 30
+    spaceCounter = 0
+    free_slots = []
+
+    for i, pos in enumerate(posList):
+        x, y = pos
+        found = False
+        for car_box in car_boxes:
+            car_x, car_y, car_w, car_h = car_box
+            if car_x < x + width and car_x + car_w > x and car_y < y + height and car_y + car_h > y:
+                color = (0, 0, 255)
+                found = True
+                break
+        if not found:
+            color = (0, 255, 0)
+            spaceCounter += 1
+            free_slots.append(i + 1)
+
+        cv2.rectangle(frame, (x, y), (x + width, y + height), color, 2)
+        cv2.putText(frame, f"Slot {i + 1}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    timestamp = datetime.datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+    cv2.putText(frame, f'Time: {timestamp}', (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(frame, f'Free: {spaceCounter}/{len(posList)}', (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(frame, f'Slot: {str(free_slots)}', (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+# Inisialisasi FPS dan waktu
+frame_count = 0
+start_time = time.time()
+fps_list = []
+current_time = time.time()
+
+# Inisialisasi file Excel
+if not os.path.exists(excel_path):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "FPS Data"
+    ws.append(["Timestamp", "FPS"])
+    wb.save(excel_path)
+
+# Loop utama untuk proses video
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    results = model(frame)
+    car_boxes = []
+
+    for result in results:
+        for box in result.boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            confidence = box.conf[0]
+            class_id = int(box.cls[0])
+            label = model.names[class_id]
+
+            if label.lower() in ["car", "mobil", "0"]:
+                car_boxes.append((x1, y1, x2 - x1, y2 - y1))
+                text = f"{label}: {confidence:.2f}"
+                color = (255, 0, 0)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+    checkParkingSpace(frame, car_boxes)
+    frame_count += 1
+    elapsed_time = time.time() - current_time
+
+    # Perbarui FPS setiap detik
+    if elapsed_time >= 1.0:
+        fps = frame_count / elapsed_time
+        fps_list.append(fps)
+        print(f"Live FPS: {fps:.2f}")
+
+        # Tulis FPS ke file Excel
+        wb = load_workbook(excel_path)
+        ws = wb.active
+        ws.append([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), fps])
+        wb.save(excel_path)
+
+        frame_count = 0
+        current_time = time.time()
+
+    # Tambahkan FPS ke frame
+    cv2.putText(frame, f'Live FPS: {fps:.2f}', (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+    cv2.imshow("Parking Detection", frame)
+    out.write(frame)
+
+    if cv2.waitKey(1) == 27:  # Tekan ESC untuk keluar
+        break
+
+# Hitung FPS total
+end_time = time.time()
+total_time = end_time - start_time
+total_fps = sum(fps_list) / len(fps_list) if fps_list else 0
+print(f"Total FPS: {total_fps:.2f}")
+
+# Cleanup
+cap.release()
+out.release()
+cv2.destroyAllWindows()
